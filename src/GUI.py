@@ -33,9 +33,9 @@ def toggle_bleaching_action():
     
     # Update button color/text
     if show_corrected:
-        btn_toggle.config(text="View: Corrected", bg="#90EE90")
+        btn_toggle.config(text="Toggle Bleaching", bg="#90EE90")
     else:
-        btn_toggle.config(text="View: Raw Data", bg="#FFB6C1")
+        btn_toggle.config(text="Toggle Bleaching", bg="#FFB6C1")
     
     # RE-DRAW the current plot type (Trace, PETH, or Hist) with the new data
     universal_plot_trigger()
@@ -111,48 +111,63 @@ def on_motion(event):
     
     canvas.draw_idle()
     
-
 def on_release(event):
     global is_dragging
     is_dragging = False
 
         
-def zoom_factory(ax, base_scale=1.5):
+def zoom_factory(ax, base_scale=1.2):
     def zoom_fun(event):
-        # Only zoom if the mouse is inside the plot area
-        if event.inaxes != ax: return
+        global canvas
+        # event.x and event.y are pixel locations
+        # bbox is the plot's physical box on screen
+        bbox = ax.get_window_extent()
         
-        # Get the current x and y limits
-        cur_xlim = ax.get_xlim()
-        cur_ylim = ax.get_ylim()
-        
-        xdata = event.xdata # get event x location
-        ydata = event.ydata # get event y location
-        
+        # 1. Determine the "Zone" based on pixels
+        is_on_x_axis = event.y < bbox.ymin  # Below the plot
+        is_on_y_axis = event.x < bbox.xmin  # Left of the plot
+        is_inside = event.inaxes == ax      # Inside the plot
+
+        # 2. Set scale factor
         if event.button == 'up':
-            # Deal with zoom in
             scale_factor = 1 / base_scale
         elif event.button == 'down':
-            # Deal with zoom out
             scale_factor = base_scale
         else:
-            # deal with something that should never happen
-            scale_factor = 1
+            return
 
-        # Calculate new logical limits
-        new_width = (cur_xlim[1] - cur_xlim[0]) * scale_factor
-        new_height = (cur_ylim[1] - cur_ylim[0]) * scale_factor
+        cur_xlim = ax.get_xlim()
+        cur_ylim = ax.get_ylim()
 
-        rel_x = (cur_xlim[1] - xdata) / (cur_xlim[1] - cur_xlim[0])
-        rel_y = (cur_ylim[1] - ydata) / (cur_ylim[1] - cur_ylim[0])
+        # --- MODE A: STRETCH X (Scroll below the graph) ---
+        if is_on_x_axis and not is_on_y_axis:
+            new_width = (cur_xlim[1] - cur_xlim[0]) * scale_factor
+            # We zoom toward the mouse's X-position in data units
+            xdata = event.xdata if event.xdata else (cur_xlim[0] + cur_xlim[1]) / 2
+            rel_x = (cur_xlim[1] - xdata) / (cur_xlim[1] - cur_xlim[0])
+            ax.set_xlim([xdata - new_width * (1 - rel_x), xdata + new_width * rel_x])
 
-        ax.set_xlim([xdata - new_width * (1 - rel_x), xdata + new_width * (rel_x)])
-        ax.set_ylim([ydata - new_height * (1 - rel_y), ydata + new_height * (rel_y)])
-        
+        # --- MODE B: STRETCH Y (Scroll left of the graph) ---
+        elif is_on_y_axis and not is_on_x_axis:
+            new_height = (cur_ylim[1] - cur_ylim[0]) * scale_factor
+            ydata = event.ydata if event.ydata else (cur_ylim[0] + cur_ylim[1]) / 2
+            rel_y = (cur_ylim[1] - ydata) / (cur_ylim[1] - cur_ylim[0])
+            ax.set_ylim([ydata - new_height * (1 - rel_y), ydata + new_height * rel_y])
+
+        # --- MODE C: UNIFORM ZOOM (Inside the graph) ---
+        elif is_inside:
+            new_width = (cur_xlim[1] - cur_xlim[0]) * scale_factor
+            new_height = (cur_ylim[1] - cur_ylim[0]) * scale_factor
+            
+            rel_x = (cur_xlim[1] - event.xdata) / (cur_xlim[1] - cur_xlim[0])
+            rel_y = (cur_ylim[1] - event.ydata) / (cur_ylim[1] - cur_ylim[0])
+
+            ax.set_xlim([event.xdata - new_width * (1 - rel_x), event.xdata + new_width * rel_x])
+            ax.set_ylim([event.ydata - new_height * (1 - rel_y), event.ydata + new_height * rel_y])
+
         canvas.draw_idle()
 
     return zoom_fun
-
 # FOR ERRORS (Red X icon)
 def show_error(msg):
     tk.messagebox.showerror("Data Error", msg)
@@ -223,43 +238,41 @@ def load_data_set():
     return
 
 #ADDS NOTES TO THE PLOT
-def _update_plot_with_notes(markers): 
-    global ax, canvas
-    
-    if not ax: return
-    """
-    Only draws labels that are actually within the current X-axis view.
-    """
+def _update_plot_with_notes(markers):
+    global ax
     import matplotlib.transforms as transforms
     
-    # Get the CURRENT visible time window
+    # 1. Get the CURRENT visible time window
     xmin, xmax = ax.get_xlim()
     
-    # Blended transform: X=Data, Y=Axis Fraction (0 to 1)
+    # 2. Setup the "Sticky" transform (X=Data, Y=Axis Fraction)
     trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
     
     unique_labels = set()
     
     for m in markers:
-        # --- THE FIX: Skip if the marker is off-screen ---
+        # --- FIX 1: TIME FILTER ---
+        # If the clap is more than 0.5s outside the current view, skip it
         if m['time'] < xmin or m['time'] > xmax:
             continue
             
         legend_label = m['label'] if m['label'] not in unique_labels else "_nolegend_"
         unique_labels.add(m['label'])
         
-        # 1. Vertical Line
+        # 3. Draw the Line
         ax.axvline(x=m['time'], color=m['color'], linestyle='--', alpha=0.3, label=legend_label)
         
-        # 2. Text Label (Pinned to top 90%)
-        ax.text(m['time'], 0.9, f" {m['label']}", 
+        # 4. --- FIX 2: THE CLIP BOX ---
+        # 'clip_on=True' tells Matplotlib to chop off the text if it hits the axis edge
+        ax.text(m['time'], 0.95, f" {m['label']}", 
                 transform=trans, 
                 rotation=90, 
                 verticalalignment='top', 
+                clip_on=True,              # <--- Crucial for zooming
                 fontsize=8, 
                 color=m['color'], 
                 fontweight='bold',
-                bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
+                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
 
 def _refresh_notes_position():
     """
