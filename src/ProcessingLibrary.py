@@ -21,21 +21,26 @@ def get_tdt_struct(path):
     #This is the raw data
     return data
 
-def get_plot_data(data, store_name, channel=0, max_points=5000):
+def get_plot_data(data, store_name, channel=0, max_points=None):
     "Get Data From Struct"
     stream = data.streams[store_name]
-    fs = stream.fs  # Extracting the actual sampling frequency
+    fs = stream.fs
     
     data_2d = np.atleast_2d(stream.data)
     if channel >= data_2d.shape[0]:
         channel = 0
         
     y_full = data_2d[channel, :]
-    ds_factor = max(1, len(y_full) // max_points)
-    y = y_full[::ds_factor]
     
-    # Generate time axis using the EXACT fs from the file
-    x = np.arange(len(y)) * (ds_factor / fs)
+    # Only downsample if max_points is actually provided
+    if max_points:
+        ds_factor = max(1, len(y_full) // max_points)
+        y = y_full[::ds_factor]
+        x = np.arange(len(y)) * (ds_factor / fs)
+    else:
+        # Get every single point for high-res analysis
+        y = y_full
+        x = np.arange(len(y)) / fs
     
     return x, y, fs
 
@@ -108,4 +113,28 @@ def get_event_markers(data):
         })
     return markers
 
-
+def get_zscore_slice(x, y, center_time, window=30):
+    """
+    Slices a signal y around a center_time (+/- window) 
+    and returns a local z-score.
+    """
+    # Calculate start and end indices based on the time vector x
+    # This is more robust than just index math if your sampling isn't perfectly uniform
+    start_time = center_time - window
+    end_time = center_time + window
+    
+    mask = (x >= start_time) & (x <= end_time)
+    slice_y = y[mask]
+    
+    if len(slice_y) == 0:
+        return None
+    
+    # Calculate local Z-score
+    mean_val = np.mean(slice_y)
+    std_val = np.std(slice_y)
+    
+    if std_val == 0: 
+        return np.zeros_like(slice_y)
+        
+    z_slice = (slice_y - mean_val) / std_val
+    return z_slice

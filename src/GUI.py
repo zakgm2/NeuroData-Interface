@@ -26,19 +26,23 @@ root.title("NeuroData Interface - " + str(folder_path))
 
 def toggle_bleaching_action():
     global show_corrected
-    if 'cache' not in globals(): return
-
-    # Flip the boolean
+    if 'cache' not in globals() or cache is None: return
+    
+    # 1. ONLY capture the Time (X) view
+    curr_xlim = ax.get_xlim()
+    
+    # 2. Toggle the data
     show_corrected = not show_corrected
     
-    # Update button color/text
-    if show_corrected:
-        btn_toggle.config(text="Toggle Bleaching", bg="#90EE90")
-    else:
-        btn_toggle.config(text="Toggle Bleaching", bg="#FFB6C1")
+    # 3. Re-plot
+    simple_plot() 
     
-    # RE-DRAW the current plot type (Trace, PETH, or Hist) with the new data
-    universal_plot_trigger()
+    # 4. Restore the Time zoom, but let Y-axis auto-scale to the new data height
+    ax.set_xlim(curr_xlim)
+    ax.relim()
+    ax.autoscale_view(scalex=False, scaley=True)
+    
+    canvas.draw_idle()
     
 def on_select(eclick, erelease):
     """
@@ -66,12 +70,16 @@ def on_press(event):
     global is_dragging, press_x, press_y
     if event.inaxes != ax: return
     
-    # Button 3 is RIGHT-CLICK
+    # 1. Start dragging logic for Right-Click (Button 3)
     if event.button == 3: 
         is_dragging = True
-        # Store the INITIAL pixel location (not data coordinates)
         press_x, press_y = event.x, event.y
 
+    # 2. Check for double-click separately 
+    # We do NOT return early here so the rest of the script stays alive
+    if event.dblclick and event.button == 1:
+        launch_zscore_peth(event.xdata)
+        
 def on_motion(event):
     # 1. ADD CACHE HERE so the function can see your data
     global ax, canvas, is_dragging, press_x, press_y, cache
@@ -115,7 +123,105 @@ def on_release(event):
     global is_dragging
     is_dragging = False
 
+def launch_zscore_peth(center_t):
+    if 'cache' not in globals() or cache is None: return
+    
+    # --- 1. SMART DATA SELECTION ---
+    # This ensures the PETH matches exactly what you are seeing on the main screen
+    is_corr = show_corrected  # Checks your global toggle
+    data_source = cache['corr'] if is_corr else cache['raw']
+    fs = cache['fs']
+    x_full = cache['x']
+    
+    # --- 2. SMOOTHING & WINDOWING ---
+    window_size = int(fs * 0.5) 
+    if window_size % 2 == 0: window_size += 1
+    clean_signal = np.convolve(data_source, np.ones(window_size)/window_size, mode='same')
+    
+    start_t, end_t = center_t - 30, center_t + 30
+    mask = (x_full >= start_t) & (x_full <= end_t)
+    y_seg = clean_signal[mask]
+    
+    if len(y_seg) > 10:
+        # --- 3. ROBUST Z-SCORE ---
+        median_val = np.median(y_seg)
+        mad_val = np.median(np.abs(y_seg - median_val))
+        z_seg = 0.6745 * (y_seg - median_val) / (mad_val if mad_val != 0 else 1)
+        z_seg = np.clip(z_seg, -5, 5)
+
+        # --- 4. BINNING ---
+        num_bins = 300 
+        bin_edges = np.linspace(0, len(z_seg), num_bins + 1).astype(int)
+        z_binned = np.array([np.mean(z_seg[bin_edges[i]:bin_edges[i+1]]) for i in range(num_bins)])
+
+        # --- 5. UI SETUP ---
+        mode_str = "Corrected" if is_corr else "Raw"
+        pop = tk.Toplevel(root)
+        pop.title(f"Z-score Peth ({mode_str}) - {center_t:.2f}s")
         
+        fig_peth = Figure(figsize=(8, 7), dpi=100)
+        ax_heat, ax_line = fig_peth.subplots(2, 1, sharex=True, 
+                                           gridspec_kw={'height_ratios': [1, 1]})
+        
+        # Plotting Heatmap
+        ax_heat.imshow(z_binned.reshape(1, -1), aspect='auto', 
+                       cmap='YlGnBu_r', extent=[-30, 30, 0, 1],
+                       vmin=-5, vmax=5, interpolation='bilinear') 
+        
+        ticks = [-30, -20, -10, 0, 10, 20, 30]
+        ax_heat.set_xticks(ticks)
+        ax_heat.set_xticklabels(ticks)
+        ax_heat.set_xlabel("Trial #", fontweight='bold')
+        ax_heat.set_yticks([]) 
+        
+        # Plotting Line
+        x_axis = np.linspace(-30, 30, len(z_seg))
+        ax_line.plot(x_axis, z_seg, color='black', linewidth=2) 
+        ax_line.axvline(0, color='red', linestyle='--', alpha=0.8, linewidth=1.5)
+        
+        ax_line.set_ylim([-5, 5])
+        ax_line.set_ylabel(f"Z-Score ({mode_str})", fontweight='bold')
+        ax_line.set_xlabel("Time from Center (s)", fontweight='bold')
+        ax_line.grid(True, linestyle=':', alpha=0.6)
+        
+        fig_peth.suptitle(f"Z-score Peth ({mode_str} Data)", fontsize=14, fontweight='bold')
+        fig_peth.tight_layout(rect=[0, 0.05, 1, 0.95]) 
+        
+        canvas_peth = FigureCanvasTkAgg(fig_peth, master=pop)
+        canvas_peth.draw()
+        canvas_peth.get_tk_widget().pack(fill="both", expand=True)
+
+        # --- 6. EXPORT LOGIC ---
+        def save_peth_action():
+            import datetime
+            import os
+            
+            experiment_folder = os.path.dirname(folder_path) if folder_path else os.getcwd()
+            ts = datetime.datetime.now().strftime("%H%M%S")
+            
+            # Filename now includes if it was Raw or Corrected
+            default_fn = f"PETH_{mode_str}_{int(center_t)}s_{ts}.png"
+            
+            fpath = filedialog.asksaveasfilename(
+                initialdir=experiment_folder,
+                defaultextension=".png",
+                initialfile=default_fn,
+                title=f"Export {mode_str} PETH Analysis"
+            )
+            
+            if fpath:
+                fig_peth.savefig(fpath, dpi=300, bbox_inches='tight')
+
+        # Button Frame
+        btn_frame = tk.Frame(pop)
+        btn_frame.pack(side="bottom", fill="x", pady=10)
+        
+        btn_export_peth = tk.Button(
+            btn_frame, text=f"💾 Export {mode_str} PETH", 
+            command=save_peth_action, bg="#2196F3", fg="white", 
+            font=('Helvetica', 10, 'bold'), padx=20
+        )
+        btn_export_peth.pack()
 def zoom_factory(ax, base_scale=1.2):
     def zoom_fun(event):
         global canvas
