@@ -1,15 +1,54 @@
 import tdt
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
-import scipy as scp
 from scipy.optimize import curve_fit
-from scipy.signal import butter, filtfilt
+import os
 
+def validate_tdt_folder(path):
+    """
+    Checks if a directory is a valid TDT data folder.
+    Returns: (bool, folder_name or error_msg)
+    """
+    if not path:
+        return False, "No folder selected."
+        
+    # Standard TDT folders must contain a .Tbk file (the block index)
+    has_tbk = any(fname.endswith('.Tbk') for fname in os.listdir(path))
+    
+    if has_tbk:
+        return True, os.path.basename(path)
+    else:
+        return False, "Invalid Folder: No TDT block files (.Tbk) found."
 
+def process_tdt_folder(folder_path):
+    """
+    High-level pipeline: Loads, extracts, debleaches, and finds markers.
+    Returns a dictionary of all processed data.
+    """
+    # 1. Load raw structure
+    data_struct = get_tdt_struct(folder_path)
+    
+    # 2. Extract first available stream
+    store_name = list(data_struct.streams.keys())[0]
+    x, y_raw, fs = get_plot_data(data_struct, store_name)
+    
+    # 3. Science: Apply debleaching
+    y_corr, trend = correct_bleaching(y_raw, fs)
+    
+    # 4. Metadata: Get event markers
+    markers = get_event_markers(data_struct)
+    
+    return {
+        'x': x, 
+        'raw': y_raw, 
+        'corr': y_corr, 
+        'trend': trend,
+        'fs': fs,
+        'store': store_name,
+        'markers': markers
+    }
 
 def double_exponential(x, a, b, c, d, k):
-    "The physical model of fluorophore bleaching."
+    """Literature-standard model for photo-bleaching decay."""
     return a * np.exp(-b * x) + c * np.exp(-d * x) + k
 
 def get_tdt_struct(path):
@@ -45,47 +84,40 @@ def get_plot_data(data, store_name, channel=0, max_points=None):
     return x, y, fs
 
 def correct_bleaching(y, fs):
-    "Corrects Bleaching according to literature-stated decay"
+    """
+    Corrects bleaching using a masked double-exponential fit.
+    Returns: (corrected_data, trend_line)
+    """
     x = np.arange(len(y)) / fs
     
-    #1. THE RIGID MASK: Only look at the "Top" 50% of the signal
-    # This ensures the 0s are invisible to the math
+    # 1. MASKING: Ignore signal dips (motion/artifacts) to fit only the baseline
     threshold = np.median(y) 
     mask = y > threshold
-    
-    x_fit = x[mask]
-    y_fit = y[mask]
+    x_fit, y_fit = x[mask], y[mask]
 
     if len(y_fit) < 100:
         return y, np.zeros_like(y)
 
-    #2. SMART INITIAL GUESS: Instead of fixed numbers, we look at the data
-    #k (baseline) should be near the end of the recording
+    # 2. HEURISTIC GUESSING: Makes the fit converge faster/more reliably
     k_guess = np.percentile(y_fit, 10) 
-    
-    #Total Amplitude to be explained by the decay
     total_amp = np.max(y_fit) - k_guess
-    
-    #p0 = [Amp_fast, Decay_fast, Amp_slow, Decay_slow, Baseline]
     p0 = [total_amp*0.6, 0.05, total_amp*0.4, 0.0001, k_guess]
     
-    #3. BOUNDS: Prevent the "Drop to Zero"
-    # We force the baseline 'k' to be at least the bottom of our HIGH signal
-    lower_bounds = [0, 0, 0, 0, k_guess * 0.8]
-    upper_bounds = [np.inf, 1, np.inf, 0.1, np.max(y_fit)]
+    # 3. CONSTRAINED OPTIMIZATION: Prevents the curve from 'diving' to zero
+    lower = [0, 0, 0, 0, k_guess * 0.8]
+    upper = [np.inf, 1, np.inf, 0.1, np.max(y_fit)]
 
     try:
         popt, _ = curve_fit(double_exponential, x_fit, y_fit, p0=p0, 
-                            bounds=(lower_bounds, upper_bounds), maxfev=10000)
+                            bounds=(lower, upper), maxfev=10000)
         trend = double_exponential(x, *popt)
-    except:
-        # If double-exp fails, fit a single exponential (simpler/more stable)
+    except Exception:
+        # Fallback to single exponential via log-linear fit if optimization fails
         coeffs = np.polyfit(x_fit, np.log(np.maximum(y_fit, 1e-6)), 1)
         trend = np.exp(np.polyval(coeffs, x))
 
-    #4. RESTORE: Keep the signal at the "High" mean
-    corrected = y - trend + np.mean(y_fit)
-    
+    # 4. NORMALIZATION: Centers the data around the mean of the fit-segment
+    corrected = y - trend + trend[0]
     return corrected, trend
 
 def get_event_markers(data):
@@ -114,27 +146,31 @@ def get_event_markers(data):
     return markers
 
 def get_zscore_slice(x, y, center_time, window=30):
-    """
-    Slices a signal y around a center_time (+/- window) 
-    and returns a local z-score.
-    """
-    # Calculate start and end indices based on the time vector x
-    # This is more robust than just index math if your sampling isn't perfectly uniform
-    start_time = center_time - window
-    end_time = center_time + window
+    start_t, end_t = center_time - window, center_time + window
     
-    mask = (x >= start_time) & (x <= end_time)
+    mask = (x >= start_t) & (x <= end_t)
+    slice_x = x[mask]
     slice_y = y[mask]
     
-    if len(slice_y) == 0:
-        return None
+    if len(slice_y) < 2: # Need at least 2 points for std dev
+        return None, None
     
-    # Calculate local Z-score
     mean_val = np.mean(slice_y)
     std_val = np.std(slice_y)
     
-    if std_val == 0: 
-        return np.zeros_like(slice_y)
-        
-    z_slice = (slice_y - mean_val) / std_val
-    return z_slice
+    # Use a tiny epsilon (1e-9) to avoid true division by zero errors
+    z_slice = (slice_y - mean_val) / (std_val if std_val > 0 else 1e-9)
+    
+    return slice_x, z_slice
+
+def smooth_signal(data, fs, window_sec=0.5):
+    """Calculates a moving average smoothed signal."""
+    window_size = int(fs * window_sec)
+    if window_size % 2 == 0: window_size += 1
+    return np.convolve(data, np.ones(window_size)/window_size, mode='same')
+
+def bin_for_heatmap(z_seg, num_bins=300):
+    """Calculates the averages for the heatmap bins."""
+    if z_seg is None or len(z_seg) == 0: return np.zeros(num_bins)
+    bin_edges = np.linspace(0, len(z_seg), num_bins + 1).astype(int)
+    return np.array([np.mean(z_seg[bin_edges[i]:bin_edges[i+1]]) for i in range(num_bins)])

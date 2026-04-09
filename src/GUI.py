@@ -1,12 +1,11 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 import os
 import ProcessingLibrary
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.widgets import RectangleSelector
-import numpy as np
 import datetime
 
 
@@ -24,76 +23,136 @@ press_x, press_y = None, None
 root = tk.Tk()
 root.title("NeuroData Interface - " + str(folder_path))
 
+def show_window_toast(message, duration=2500):
+    """
+    Displays a modern, non-blocking notification in the bottom-right 
+    of the main window. Replaces clunky 'OK' popups.
+    """
+    # 1. Create a borderless window
+    toast = tk.Toplevel(root)
+    toast.overrideredirect(True) # Removes the title bar/minimize buttons
+    toast.attributes("-topmost", True) # Keeps it above the graph
+    
+    # 2. Style it (Dark theme looks very professional)
+    label = tk.Label(toast, text=message, bg="#333333", fg="white", 
+                     padx=20, pady=10, font=("Helvetica", 10, "bold"))
+    label.pack()
+
+    # 3. POSITIONING MATH
+    # Force Tkinter to calculate the sizes before we use them
+    root.update_idletasks()
+    toast.update_idletasks()
+    
+    # Get coordinates of the main window
+    root_x = root.winfo_x()
+    root_y = root.winfo_y()
+    root_w = root.winfo_width()
+    root_h = root.winfo_height()
+    
+    # Get size of the toast itself
+    t_w = toast.winfo_width()
+    t_h = toast.winfo_height()
+    
+    # Calculate bottom-right with 20px padding
+    pos_x = root_x + root_w - t_w - 20
+    pos_y = root_y + root_h - t_h - 20
+    
+    toast.geometry(f"+{pos_x}+{pos_y}")
+    
+    # 4. Auto-destroy after the duration (ms)
+    toast.after(duration, toast.destroy)
+
 def toggle_bleaching_action():
     global show_corrected
     if 'cache' not in globals() or cache is None: return
     
-    # 1. ONLY capture the Time (X) view
+    # 1. THE MEMORY: Grab exactly where the user is looking
     curr_xlim = ax.get_xlim()
+    curr_ylim = ax.get_ylim()
     
-    # 2. Toggle the data
+    # 2. THE SWAP: Flip the boolean
     show_corrected = not show_corrected
     
-    # 3. Re-plot
-    simple_plot() 
+    # 3. THE RE-RENDER: Call your plot function
+    simple_plot(draw_now=False)
     
-    # 4. Restore the Time zoom, but let Y-axis auto-scale to the new data height
+    # 4. THE RESTORATION: Force the "camera" back to the previous zoom
     ax.set_xlim(curr_xlim)
-    ax.relim()
-    ax.autoscale_view(scalex=False, scaley=True)
+    ax.set_ylim(curr_ylim)
     
     canvas.draw_idle()
+    
+    # 6. Toast Feedback (Replaces intrusive popups)
+    mode = "Debleached" if show_corrected else "Raw"
+    show_window_toast(f"View Switched: {mode}")
     
 def on_select(eclick, erelease):
     """
-    Called when you finish dragging the rectangle.
+    Handles the 'Box Zoom' logic when the user drags a rectangle.
     """
-    # Get the coordinates in DATA units
+    # 1. Coordinate Validation
     x1, y1 = eclick.xdata, eclick.ydata
     x2, y2 = erelease.xdata, erelease.ydata
 
-    # If the user clicks outside the actual plot area, xdata/ydata will be None
     if None in [x1, x2, y1, y2]:
         return
 
-    # Prevent 'micro-zooms' from accidental clicks
+    # 2. Prevent 'Micro-Zooms' (Accidental clicks while trying to drag)
+    # 0.1s is a good threshold for photometry data
     if abs(x1 - x2) < 0.1:
         return
 
-    # Apply the new window
+    # 3. Apply the new view boundaries
+    # Using min/max ensures the zoom works regardless of drag direction (TL->BR or BR->TL)
     ax.set_xlim(min(x1, x2), max(x1, x2))
     ax.set_ylim(min(y1, y2), max(y1, y2))
     
+    # This clears the yellow box graphics from the screen
+    rect_selector.clear()
+    
+    # 4. Refresh & Feedback
     canvas.draw_idle()
+    show_window_toast("Zoomed to Selection")
 
 def on_press(event):
     global is_dragging, press_x, press_y
-    if event.inaxes != ax: return
     
-    # 1. Start dragging logic for Right-Click (Button 3)
+    # Safety Check: Ignore clicks on the toolbar or axis labels
+    if event.inaxes != ax: 
+        return
+    
+    # 1. Right-Click (Button 3): Initiate Panning
     if event.button == 3: 
         is_dragging = True
+        # We store pixel coordinates (event.x) for smoother math during motion
         press_x, press_y = event.x, event.y
 
-    # 2. Check for double-click separately 
-    # We do NOT return early here so the rest of the script stays alive
-    if event.dblclick and event.button == 1:
-        launch_zscore_peth(event.xdata)
+    # 2. Left Double-Click: Trigger Analysis
+    elif event.dblclick and event.button == 1:
+        if event.xdata is not None:
+            analysis_type(event.xdata)
+            
+    # If middle-click (Scroll wheel click), reset view
+    if event.button == 2: 
+        reset_zoom()
         
 def on_motion(event):
-    # 1. ADD CACHE HERE so the function can see your data
-    global ax, canvas, is_dragging, press_x, press_y, cache
+    global press_x, press_y
     
+    # 1. Early Exit Logic
     if not is_dragging or event.inaxes != ax: 
         return
     if event.x is None or event.y is None: 
         return
 
-    # --- (Keep your existing dx/dy and shift_x/y math here) ---
+    # 2. Calculate Distance Moved in Pixels
     dx = event.x - press_x
     dy = event.y - press_y
+    
+    # Update anchor for the next frame
     press_x, press_y = event.x, event.y
 
+    # 3. Convert Pixels to Data Units
     cur_xlim = ax.get_xlim()
     cur_ylim = ax.get_ylim()
     bbox = ax.get_window_extent()
@@ -101,22 +160,13 @@ def on_motion(event):
     shift_x = (dx / bbox.width) * (cur_xlim[1] - cur_xlim[0])
     shift_y = (dy / bbox.height) * (cur_ylim[1] - cur_ylim[0])
 
+    # 4. Update Axis Limits (The actual 'Pan')
     ax.set_xlim(cur_xlim[0] - shift_x, cur_xlim[1] - shift_x)
     ax.set_ylim(cur_ylim[0] - shift_y, cur_ylim[1] - shift_y)
 
-    # 2. THE REFRESH LOGIC:
-    # We clear the old "Clap" lines/text so they don't stack up and lag
-    for artist in ax.lines + ax.texts:
-        if isinstance(artist, plt.Line2D) and artist.get_linestyle() == '--':
-            artist.remove()
-    while ax.texts:
-        ax.texts[0].remove()
-        
-    # 3. REDRAW ONLY IF CACHE EXISTS:
-    # This brings the 'Clap' and 'Food' labels back as you move
-    if 'cache' in globals() and cache is not None:
-        _update_plot_with_notes(cache['markers'])
-    
+    # 5. Fast Redraw
+    # Because we use Blended Transforms for notes, they move WITH the axis.
+    # No more deleting/re-adding in a loop!
     canvas.draw_idle()
     
 def on_release(event):
@@ -124,117 +174,88 @@ def on_release(event):
     is_dragging = False
 
 def launch_zscore_peth(center_t):
-    if 'cache' not in globals() or cache is None: return
+    if cache is None: return
     
-    # --- 1. SMART DATA SELECTION ---
-    # This ensures the PETH matches exactly what you are seeing on the main screen
-    is_corr = show_corrected  # Checks your global toggle
-    data_source = cache['corr'] if is_corr else cache['raw']
-    fs = cache['fs']
-    x_full = cache['x']
+    # 1. ANALYSIS PIPELINE (Delegated to Library)
+    data_source = cache['corr'] if show_corrected else cache['raw']
+    clean_signal = ProcessingLibrary.smooth_signal(data_source, cache['fs'])
     
-    # --- 2. SMOOTHING & WINDOWING ---
-    window_size = int(fs * 0.5) 
-    if window_size % 2 == 0: window_size += 1
-    clean_signal = np.convolve(data_source, np.ones(window_size)/window_size, mode='same')
+    slice_x, z_seg = ProcessingLibrary.get_zscore_slice(cache['x'], clean_signal, center_t, window=30)
     
-    start_t, end_t = center_t - 30, center_t + 30
-    mask = (x_full >= start_t) & (x_full <= end_t)
-    y_seg = clean_signal[mask]
-    
-    if len(y_seg) > 10:
-        # --- 3. ROBUST Z-SCORE ---
-        median_val = np.median(y_seg)
-        mad_val = np.median(np.abs(y_seg - median_val))
-        z_seg = 0.6745 * (y_seg - median_val) / (mad_val if mad_val != 0 else 1)
-        z_seg = np.clip(z_seg, -5, 5)
+    if z_seg is not None:
+        z_binned = ProcessingLibrary.bin_for_heatmap(z_seg)
+        mode_str = "Corrected" if show_corrected else "Raw"
 
-        # --- 4. BINNING ---
-        num_bins = 300 
-        bin_edges = np.linspace(0, len(z_seg), num_bins + 1).astype(int)
-        z_binned = np.array([np.mean(z_seg[bin_edges[i]:bin_edges[i+1]]) for i in range(num_bins)])
-
-        # --- 5. UI SETUP ---
-        mode_str = "Corrected" if is_corr else "Raw"
+        # 2. UI SETUP (Toplevel Window)
         pop = tk.Toplevel(root)
-        pop.title(f"Z-score Peth ({mode_str}) - {center_t:.2f}s")
+        pop.title(f"PETH Analysis ({mode_str}) - {center_t:.2f}s")
         
         fig_peth = Figure(figsize=(8, 7), dpi=100)
-        ax_heat, ax_line = fig_peth.subplots(2, 1, sharex=True, 
-                                           gridspec_kw={'height_ratios': [1, 1]})
+        ax_heat, ax_line = fig_peth.subplots(2, 1, sharex=True, gridspec_kw={'height_ratios': [1, 1]})
         
-        # Plotting Heatmap
-        ax_heat.imshow(z_binned.reshape(1, -1), aspect='auto', 
-                       cmap='YlGnBu_r', extent=[-30, 30, 0, 1],
-                       vmin=-5, vmax=5, interpolation='bilinear') 
-        
-        ticks = [-30, -20, -10, 0, 10, 20, 30]
-        ax_heat.set_xticks(ticks)
-        ax_heat.set_xticklabels(ticks)
-        ax_heat.set_xlabel("Trial #", fontweight='bold')
+        # 3. HEATMAP PLOT
+        ax_heat.imshow(z_binned.reshape(1, -1), aspect='auto', cmap='YlGnBu_r', 
+                       extent=[-30, 30, 0, 1], vmin=-5, vmax=5, interpolation='bilinear') 
         ax_heat.set_yticks([]) 
+        ax_heat.set_ylabel("Intensity", fontweight='bold')
         
-        # Plotting Line
-        x_axis = np.linspace(-30, 30, len(z_seg))
-        ax_line.plot(x_axis, z_seg, color='black', linewidth=2) 
-        ax_line.axvline(0, color='red', linestyle='--', alpha=0.8, linewidth=1.5)
-        
+        # 4. LINE PLOT
+        ax_line.plot(slice_x - center_t, z_seg, color='black', linewidth=1.5) 
+        ax_line.axvline(0, color='red', linestyle='--', alpha=0.8)
+        ax_line.set_xlim([-30, 30])
         ax_line.set_ylim([-5, 5])
         ax_line.set_ylabel(f"Z-Score ({mode_str})", fontweight='bold')
         ax_line.set_xlabel("Time from Center (s)", fontweight='bold')
-        ax_line.grid(True, linestyle=':', alpha=0.6)
         
         fig_peth.suptitle(f"Z-score Peth ({mode_str} Data)", fontsize=14, fontweight='bold')
         fig_peth.tight_layout(rect=[0, 0.05, 1, 0.95]) 
         
         canvas_peth = FigureCanvasTkAgg(fig_peth, master=pop)
-        canvas_peth.draw()
         canvas_peth.get_tk_widget().pack(fill="both", expand=True)
 
-        # --- 6. EXPORT LOGIC ---
+        # 5. EXPORT LOGIC
         def save_peth_action():
-            import datetime
-            import os
-            
-            experiment_folder = os.path.dirname(folder_path) if folder_path else os.getcwd()
             ts = datetime.datetime.now().strftime("%H%M%S")
-            
-            # Filename now includes if it was Raw or Corrected
             default_fn = f"PETH_{mode_str}_{int(center_t)}s_{ts}.png"
             
             fpath = filedialog.asksaveasfilename(
-                initialdir=experiment_folder,
+                initialdir=os.path.dirname(folder_path) if folder_path else os.getcwd(),
                 defaultextension=".png",
                 initialfile=default_fn,
-                title=f"Export {mode_str} PETH Analysis"
+                title="Export PETH Analysis"
             )
-            
-            if fpath:
-                fig_peth.savefig(fpath, dpi=300, bbox_inches='tight')
 
-        # Button Frame
+            if fpath:
+                try:
+                    # CRUCIAL: Save 'fig_peth', NOT the global 'fig'
+                    fig_peth.savefig(fpath, dpi=300, bbox_inches='tight')
+                    show_window_toast("✅ PETH Exported Successfully")
+                except Exception as e:
+                    show_error(f"Export Failed: {str(e)}")
+
         btn_frame = tk.Frame(pop)
         btn_frame.pack(side="bottom", fill="x", pady=10)
         
-        btn_export_peth = tk.Button(
-            btn_frame, text=f"💾 Export {mode_str} PETH", 
-            command=save_peth_action, bg="#2196F3", fg="white", 
-            font=('Helvetica', 10, 'bold'), padx=20
-        )
-        btn_export_peth.pack()
+        tk.Button(btn_frame, text=f"💾 Export {mode_str} PETH", 
+                  command=save_peth_action, bg="#2196F3", fg="white", 
+                  font=('Helvetica', 10, 'bold'), padx=20).pack()
+        
+        # Confirmation Toast
+        show_window_toast(f"PETH Generated at {center_t:.1f}s")
+        
 def zoom_factory(ax, base_scale=1.2):
     def zoom_fun(event):
-        global canvas
-        # event.x and event.y are pixel locations
-        # bbox is the plot's physical box on screen
+        # Safety check: ignore scroll events on the toolbar/buttons
+        if event.x is None or event.y is None: return
+        
         bbox = ax.get_window_extent()
         
-        # 1. Determine the "Zone" based on pixels
-        is_on_x_axis = event.y < bbox.ymin  # Below the plot
-        is_on_y_axis = event.x < bbox.xmin  # Left of the plot
-        is_inside = event.inaxes == ax      # Inside the plot
+        # 1. Zone Detection (The UX Secret Sauce)
+        is_on_x_axis = event.y < bbox.ymin  
+        is_on_y_axis = event.x < bbox.xmin  
+        is_inside = event.inaxes == ax      
 
-        # 2. Set scale factor
+        # 2. Scale Calculation
         if event.button == 'up':
             scale_factor = 1 / base_scale
         elif event.button == 'down':
@@ -242,32 +263,29 @@ def zoom_factory(ax, base_scale=1.2):
         else:
             return
 
-        cur_xlim = ax.get_xlim()
-        cur_ylim = ax.get_ylim()
+        cur_xlim, cur_ylim = ax.get_xlim(), ax.get_ylim()
 
-        # --- MODE A: STRETCH X (Scroll below the graph) ---
+        # 3. Mode A: X-Only Zoom (User scrolls on the X-Axis labels)
         if is_on_x_axis and not is_on_y_axis:
+            # Use 50/50 anchor if mouse isn't over a specific data point
+            xdata = event.xdata if event.xdata is not None else (cur_xlim[0] + cur_xlim[1]) / 2
             new_width = (cur_xlim[1] - cur_xlim[0]) * scale_factor
-            # We zoom toward the mouse's X-position in data units
-            xdata = event.xdata if event.xdata else (cur_xlim[0] + cur_xlim[1]) / 2
             rel_x = (cur_xlim[1] - xdata) / (cur_xlim[1] - cur_xlim[0])
             ax.set_xlim([xdata - new_width * (1 - rel_x), xdata + new_width * rel_x])
 
-        # --- MODE B: STRETCH Y (Scroll left of the graph) ---
+        # 4. Mode B: Y-Only Zoom (User scrolls on the Y-Axis labels)
         elif is_on_y_axis and not is_on_x_axis:
+            ydata = event.ydata if event.ydata is not None else (cur_ylim[0] + cur_ylim[1]) / 2
             new_height = (cur_ylim[1] - cur_ylim[0]) * scale_factor
-            ydata = event.ydata if event.ydata else (cur_ylim[0] + cur_ylim[1]) / 2
             rel_y = (cur_ylim[1] - ydata) / (cur_ylim[1] - cur_ylim[0])
             ax.set_ylim([ydata - new_height * (1 - rel_y), ydata + new_height * rel_y])
 
-        # --- MODE C: UNIFORM ZOOM (Inside the graph) ---
-        elif is_inside:
+        # 5. Mode C: Uniform Zoom (User scrolls in the data area)
+        elif is_inside and event.xdata is not None and event.ydata is not None:
             new_width = (cur_xlim[1] - cur_xlim[0]) * scale_factor
             new_height = (cur_ylim[1] - cur_ylim[0]) * scale_factor
-            
             rel_x = (cur_xlim[1] - event.xdata) / (cur_xlim[1] - cur_xlim[0])
             rel_y = (cur_ylim[1] - event.ydata) / (cur_ylim[1] - cur_ylim[0])
-
             ax.set_xlim([event.xdata - new_width * (1 - rel_x), event.xdata + new_width * rel_x])
             ax.set_ylim([event.ydata - new_height * (1 - rel_y), event.ydata + new_height * rel_y])
 
@@ -277,176 +295,170 @@ def zoom_factory(ax, base_scale=1.2):
 
 # FOR ERRORS (Red X icon)
 def show_error(msg):
-    tk.messagebox.showerror("Data Error", msg)
+    """
+    Used only for critical/blocking errors. 
+    In a literature review, this is 'Modal Error Handling' 
+    reserved for state-breaking events.
+    """
+    tk.messagebox.showerror("NeuroData Error", f"❌ {msg}")
 
 # FOR SUCCESS (Blue 'i' icon)
 def show_success(msg):
-    tk.messagebox.showinfo("Success", msg)
+    """
+    Replaces blocking popups with non-intrusive toast notifications.
+    This allows the user to continue interacting with data without 
+    interruption (Non-blocking UI).
+    """
+    show_window_toast(f"✅ {msg}")
 
-# CHOOSING FILE TO USE
 def choose_file():
     global folder_path
     path = filedialog.askdirectory()
     
-    # Validation: Check for TDT files
-    if path and any(fname.endswith('.Tbk') for fname in os.listdir(path)):
+    # Validation logic is now 'black-boxed' in the library (Good for science!)
+    is_valid, result = ProcessingLibrary.validate_tdt_folder(path)
+    
+    if is_valid:
         folder_path = path
-        root.title("NeuroData Interface - " + os.path.basename(folder_path))
-        show_success(f"Successfully linked to: {os.path.basename(path)}")
+        root.title(f"NeuroData Interface - {result}")
+        # Using show_success here, which we've mapped to our new Toast
+        show_success(f"Linked to: {result}")
     else:
-        # This triggers the classic Windows 'Ding' and Error Window
-        show_error("Invalid Folder: No TDT data files (.Tbk) found in this directory.")
-
+        # Errors still use popups because they require immediate attention
+        show_error(result)
+    
 #LOADING THE DATA INTO THE GUI
 def load_data_action():
-    global current_data, cache
+    global cache
     if folder_path is None:
         show_error("Please select a folder first!")
         return
 
     try:
-        # 1. Load the raw TDT structure
-        current_data = ProcessingLibrary.get_tdt_struct(folder_path)
+        # One call to the library handles the entire science pipeline
+        cache = ProcessingLibrary.process_tdt_folder(folder_path)
         
-        # 2. Automatically pick the first stream (e.g., '465N' or 'Fi1r')
-        store_name = list(current_data.streams.keys())[0]
+        msg = f"Loaded {cache['store']} ({cache['fs']:.1f} Hz)"
+        show_success(msg)
         
-        # 3. Get the raw Y, the time X, and the FS
-        x, y_raw, fs = ProcessingLibrary.get_plot_data(current_data, store_name)
-        
-        # 4. Apply the 'Real' Bleaching Correction we built
-        # This uses the mask to ignore those 0-dips
-        y_corr, trend = ProcessingLibrary.correct_bleaching(y_raw, fs)
-
-        # 5. Get the notes
-        event_markers = ProcessingLibrary.get_event_markers(current_data)
-        
-        # 6. Store in cache for the Plotting function
-        cache = {
-            'x': x, 
-            'raw': y_raw, 
-            'corr': y_corr, 
-            'trend': trend,
-            'fs': fs,
-            'store': store_name,
-            'markers': event_markers
-        }
-        
-        show_success(f"Successfully loaded {store_name} ({fs:.2f} Hz)")
+        # Trigger the initial plot
+        simple_plot() 
         
     except Exception as e:
-        show_error(f"Load Error: {str(e)}")
-
+        show_error(f"Processing Failed: {str(e)}")
 
 #LOADING THE DATA IN THE GUI
 def load_data_set():
+    """
+    The 'Master Trigger' for the data pipeline.
+    Combines folder selection and automated processing into one action.
+    """
+    # 1. Open the dialog (Updates 'folder_path' if successful)
     choose_file()
-    load_data_action()
-    return
+    
+    # 2. Only proceed to load if the user didn't cancel the dialog
+    if folder_path:
+        load_data_action()
 
 #ADDS NOTES TO THE PLOT
 def _update_plot_with_notes(markers):
-    global ax
     import matplotlib.transforms as transforms
-    
-    # 1. Get the CURRENT visible time window
-    xmin, xmax = ax.get_xlim()
-    
-    # 2. Setup the "Sticky" transform (X=Data, Y=Axis Fraction)
+    # X=Data coordinates, Y=0to1 (Axes fraction)
     trans = transforms.blended_transform_factory(ax.transData, ax.transAxes)
     
     unique_labels = set()
     
+    # We remove the xmin/xmax filter here because 'clip_on=True' 
+    # handles this at the C++ level in Matplotlib, which is much faster.
     for m in markers:
-        # --- FIX 1: TIME FILTER ---
-        # If the clap is more than 0.5s outside the current view, skip it
-        if m['time'] < xmin or m['time'] > xmax:
-            continue
-            
-        legend_label = m['label'] if m['label'] not in unique_labels else "_nolegend_"
+        # Manage legend redundancy
+        label_id = m['label'] if m['label'] not in unique_labels else "_nolegend_"
         unique_labels.add(m['label'])
         
-        # 3. Draw the Line
-        ax.axvline(x=m['time'], color=m['color'], linestyle='--', alpha=0.3, label=legend_label)
+        # Draw the marker line
+        ax.axvline(x=m['time'], color=m['color'], linestyle='--', alpha=0.3, label=label_id)
         
-        # 4. --- FIX 2: THE CLIP BOX ---
-        # 'clip_on=True' tells Matplotlib to chop off the text if it hits the axis edge
-        ax.text(m['time'], 0.95, f" {m['label']}", 
+        # Draw the label using the sticky transform
+        ax.text(m['time'], 0.98, f" {m['label']}", 
                 transform=trans, 
                 rotation=90, 
-                verticalalignment='top', 
-                clip_on=True,              # <--- Crucial for zooming
+                va='top',          # Vertical Alignment
+                clip_on=True,      # Automatically hides if out of view
                 fontsize=8, 
                 color=m['color'], 
                 fontweight='bold',
                 bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1))
 
-def _refresh_notes_position():
-    """
-    Adjusts existing text labels to stay at the top of the current zoom level.
-    Called during dragging (on_motion).
-    """
-    if not ax.texts: return
-    
-    ymin, ymax = ax.get_ylim()
-    new_y = ymin + (ymax - ymin) * 0.9  # Keep at 90% height
-    
-    for txt in ax.texts:
-        txt.set_y(new_y)
-
 #PLOT CORRECTED FOR BLEACHING        
-def simple_plot():
-    if 'cache' not in globals(): return
+def simple_plot(draw_now=True):
+    # 1. Safety Check: Use the clean 'is None' check
+    if cache is None: return
     
+    
+    # 2. Reset the canvas
     ax.clear()
     
-    # Decide which data to pull from the cache
+    # 3. Pull from Cache (Zero calculation here = High Performance)
     data_to_plot = cache['corr'] if show_corrected else cache['raw']
-    label_text = "Corrected (Debleached)" if show_corrected else "Raw Signal"
-    color_choice = "blue" if show_corrected else "gray"
+    label_text = "Debleached Signal" if show_corrected else "Raw Fluorescence"
+    color_choice = "blue" if show_corrected else "gray" # Blue vs Gray
 
     # Horizontal line at 0 (Amplitude)
     ax.axhline(0, color='black', linewidth=1.2, alpha=0.5, zorder=1)
     # Vertical line at 0 (Time start)
     ax.axvline(0, color='black', linewidth=1.2, alpha=0.5, zorder=1)
     
-    ax.plot(cache['x'], data_to_plot, color=color_choice, alpha=0.8, label=label_text)
     
-    # Still show notes on both!
+    # 5. The Main Trace
+    ax.plot(cache['x'], data_to_plot, color=color_choice, lw=1, alpha=0.8, label=label_text)
+    
+    # 6. Metadata Overlay
     _update_plot_with_notes(cache['markers'])
     
-    ax.set_title(f"{label_text} - {cache['store']}")
-    canvas.draw()
+    # 7. Aesthetics & Legend
+    ax.set_title(f"{label_text} - {cache['store']}", fontweight='bold', pad=15)
+    ax.set_ylabel("Amplitude")
+    ax.set_xlabel("Time (s)")
+    
+    # Only draw if we aren't mid-toggle
+    if draw_now:
+        canvas.draw()
 
 def export_canvas_action():
-    global fig, folder_path, cache
-    
-    if 'cache' not in globals() or cache is None:
+    # Only need cache; 'fig' is already accessible in the global scope
+    if cache is None:
         show_error("No data loaded to export!")
         return
 
-    # 1. Create a timestamp (YearMonthDay_HourMinute)
-    # Example: 20260408_2209 for April 8th at 10:09 PM
+    # 1. Automated Naming (YearMonthDay_HourMinute)
+    # This prevents the user from accidentally overwriting old files—a major UX win.
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-    
-    # 2. Build the default filename
     initial_name = f"{cache['store']}_Plot_{timestamp}.png"
     
-    # 3. Open the Save Dialog
+    # 2. Multi-Format Save Dialog
     file_path = filedialog.asksaveasfilename(
         defaultextension=".png",
-        filetypes=[("PNG Image", "*.png"), ("PDF Document", "*.pdf"), ("SVG Vector", "*.svg")],
+        filetypes=[
+            ("PNG Image (Standard)", "*.png"), 
+            ("PDF Document (Vector)", "*.pdf"), 
+            ("SVG Vector (Editable)", "*.svg")
+        ],
         initialfile=initial_name,
         title="Export Current View"
     )
 
     if file_path:
         try:
-            # Save with high resolution (300 DPI) for your thesis/proposal
+            # 3. High-Fidelity Rendering
+            # 'bbox_inches=tight' ensures no labels are cut off at the edges
             fig.savefig(file_path, dpi=300, bbox_inches='tight', transparent=False)
-            show_success(f"Successfully exported:\n{os.path.basename(file_path)}")
+            
+            # Non-blocking feedback
+            show_window_toast(f"✅ Exported: {os.path.basename(file_path)}")
+            
         except Exception as e:
             show_error(f"Export Failed: {str(e)}")
+
 #####################        
 # --- GUI SETUP --- #
 #####################
@@ -474,22 +486,17 @@ tk.Label(options_frame, text="|").pack(side="left", padx=5)
 
 # ---  Plot Choice ---
 plot_type_var = tk.StringVar(root)
-plot_type_var.set("Continuous Trace")
-plot_options = ["Continuous Trace", "PETH Heatmap", "Z-Score Distribution"]
+plot_type_var.set("Analysis")
+plot_options = ["Z-Score PETH"]
 dropdown = tk.OptionMenu(options_frame, plot_type_var, *plot_options)
 dropdown.pack(side="left", padx=10)
 
 # --- EXECUTE ---
-def universal_plot_trigger():
+def analysis_type(data):
     choice = plot_type_var.get()
-    if choice == "Continuous Trace":
-        simple_plot()
-    elif choice == "Z-Score Distribution":
-        show_error("Histogram function not yet implemented!")
+    if choice == "Z-Score PETH":
+        launch_zscore_peth(data)
 
-btn_plot = tk.Button(options_frame, text="2. Execute Plot", 
-                     command=universal_plot_trigger, bg="#4CAF50", fg="white", font=('Helvetica', 9, 'bold'))
-btn_plot.pack(side="left", padx=10)
 
 # ---  Zoom Reset ---
 def reset_zoom():
@@ -497,12 +504,10 @@ def reset_zoom():
 
     # 1. Clear the graph
     ax.clear()
+    simple_plot()
     
-    # 2. Re-run the current plot (Trace, PETH, or Hist)
-    # This automatically resets the axes to 'Full Scale'
-    universal_plot_trigger()
     
-    # 3. Re-link the rectangle selector so it doesn't break
+    # 2. Re-link the rectangle selector so it doesn't break
     if 'rect_selector' in globals():
         rect_selector.ax = ax
         rect_selector.set_active(True)
