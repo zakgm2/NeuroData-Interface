@@ -7,7 +7,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.widgets import RectangleSelector
 import numpy as np
-
+import datetime
 
 
 
@@ -168,6 +168,7 @@ def zoom_factory(ax, base_scale=1.2):
         canvas.draw_idle()
 
     return zoom_fun
+
 # FOR ERRORS (Red X icon)
 def show_error(msg):
     tk.messagebox.showerror("Data Error", msg)
@@ -311,8 +312,35 @@ def simple_plot():
     ax.set_title(f"{label_text} - {cache['store']}")
     canvas.draw()
 
+def export_canvas_action():
+    global fig, folder_path, cache
     
+    if 'cache' not in globals() or cache is None:
+        show_error("No data loaded to export!")
+        return
 
+    # 1. Create a timestamp (YearMonthDay_HourMinute)
+    # Example: 20260408_2209 for April 8th at 10:09 PM
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    
+    # 2. Build the default filename
+    initial_name = f"{cache['store']}_Plot_{timestamp}.png"
+    
+    # 3. Open the Save Dialog
+    file_path = filedialog.asksaveasfilename(
+        defaultextension=".png",
+        filetypes=[("PNG Image", "*.png"), ("PDF Document", "*.pdf"), ("SVG Vector", "*.svg")],
+        initialfile=initial_name,
+        title="Export Current View"
+    )
+
+    if file_path:
+        try:
+            # Save with high resolution (300 DPI) for your thesis/proposal
+            fig.savefig(file_path, dpi=300, bbox_inches='tight', transparent=False)
+            show_success(f"Successfully exported:\n{os.path.basename(file_path)}")
+        except Exception as e:
+            show_error(f"Export Failed: {str(e)}")
 #####################        
 # --- GUI SETUP --- #
 #####################
@@ -338,14 +366,14 @@ btn_choose.pack(side="left", padx=10, pady=10)
 tk.Label(options_frame, text="|").pack(side="left", padx=5)
 
 
-# --- Step 3: Plot Choice ---
+# ---  Plot Choice ---
 plot_type_var = tk.StringVar(root)
 plot_type_var.set("Continuous Trace")
 plot_options = ["Continuous Trace", "PETH Heatmap", "Z-Score Distribution"]
 dropdown = tk.OptionMenu(options_frame, plot_type_var, *plot_options)
 dropdown.pack(side="left", padx=10)
 
-# --- Step 4: EXECUTE ---
+# --- EXECUTE ---
 def universal_plot_trigger():
     choice = plot_type_var.get()
     if choice == "Continuous Trace":
@@ -357,7 +385,7 @@ btn_plot = tk.Button(options_frame, text="2. Execute Plot",
                      command=universal_plot_trigger, bg="#4CAF50", fg="white", font=('Helvetica', 9, 'bold'))
 btn_plot.pack(side="left", padx=10)
 
-# --- Step 5: Zoom Reset ---
+# ---  Zoom Reset ---
 def reset_zoom():
     if 'cache' not in globals(): return
 
@@ -382,7 +410,19 @@ btn_toggle.pack(side="left", padx=10)
 btn_reset = tk.Button(options_frame, text="Reset Zoom", command=reset_zoom)
 btn_reset.pack(side="left", padx=10)
 
-# 3. Plotting Area
+
+btn_export = tk.Button(
+    options_frame, 
+    text="Export View (PNG/PDF)", 
+    command=export_canvas_action, 
+    bg="#2196F3",   # A nice professional blue
+    fg="white", 
+    font=('Helvetica', 9, 'bold')
+)
+btn_export.pack(side="left", padx=10)
+
+
+#     Plotting Area
 plot_frame = tk.Frame(root)
 plot_frame.pack(side="bottom", fill="both", expand=True, pady=10)
 
