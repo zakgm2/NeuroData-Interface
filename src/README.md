@@ -3,7 +3,7 @@
 
 An open-source, platform-agnostic Python library and GUI designed for analyzing fiber photometry data. Developed at **Concordia University**, this tool provides a streamlined workflow for debleaching, signal processing, and Peri-Event Time Histogram (PETH) visualization.
 
-PIPELINE:
+## PIPELINE:
 Motion Artifact Correction -> Photobleaching Correction (Double Exponential Model giving baseline F_0) -> Normalization Delta F/F_0 -> Denoising 
 ---
 
