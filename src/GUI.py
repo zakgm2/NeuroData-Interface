@@ -61,30 +61,6 @@ def show_window_toast(message, duration=2500):
     
     # 4. Auto-destroy after the duration (ms)
     toast.after(duration, toast.destroy)
-
-def toggle_bleaching_action():
-    global show_corrected
-    if 'cache' not in globals() or cache is None: return
-    
-    # 1. THE MEMORY: Grab exactly where the user is looking
-    curr_xlim = ax.get_xlim()
-    curr_ylim = ax.get_ylim()
-    
-    # 2. THE SWAP: Flip the boolean
-    show_corrected = not show_corrected
-    
-    # 3. THE RE-RENDER: Call your plot function
-    simple_plot(draw_now=False)
-    
-    # 4. THE RESTORATION: Force the "camera" back to the previous zoom
-    ax.set_xlim(curr_xlim)
-    ax.set_ylim(curr_ylim)
-    
-    canvas.draw_idle()
-    
-    # 6. Toast Feedback (Replaces intrusive popups)
-    mode = "Debleached" if show_corrected else "Raw"
-    show_window_toast(f"View Switched: {mode}")
     
 def on_select(eclick, erelease):
     """
@@ -207,7 +183,7 @@ def launch_zscore_peth(center_t):
         ax_line.set_ylabel(f"Z-Score ({mode_str})", fontweight='bold')
         ax_line.set_xlabel("Time from Center (s)", fontweight='bold')
         
-        fig_peth.suptitle(f"Z-score Peth ({mode_str} Data)", fontsize=14, fontweight='bold')
+        fig_peth.suptitle("Z-score Peth", fontsize=14, fontweight='bold')
         fig_peth.tight_layout(rect=[0, 0.05, 1, 0.95]) 
         
         canvas_peth = FigureCanvasTkAgg(fig_peth, master=pop)
@@ -221,6 +197,11 @@ def launch_zscore_peth(center_t):
             fpath = filedialog.asksaveasfilename(
                 initialdir=os.path.dirname(folder_path) if folder_path else os.getcwd(),
                 defaultextension=".png",
+                filetypes=[
+                    ("PNG Image (Standard)", "*.png"), 
+                    ("PDF Document (Vector)", "*.pdf"), 
+                    ("SVG Vector (Editable)", "*.svg")
+                ],
                 initialfile=default_fn,
                 title="Export PETH Analysis"
             )
@@ -400,7 +381,7 @@ def simple_plot(draw_now=True):
     
     # 3. Pull from Cache (Zero calculation here = High Performance)
     data_to_plot = cache['corr'] if show_corrected else cache['raw']
-    label_text = "Debleached Signal" if show_corrected else "Raw Fluorescence"
+    label_text = "Signal" 
     color_choice = "blue" if show_corrected else "gray" # Blue vs Gray
 
     # Horizontal line at 0 (Amplitude)
@@ -514,10 +495,6 @@ def reset_zoom():
 
     canvas.draw_idle()
         
-btn_toggle = tk.Button(options_frame, text="Toggle Bleaching", 
-                       command=toggle_bleaching_action, bg="#90EE90")
-btn_toggle.pack(side="left", padx=10)
-
 btn_reset = tk.Button(options_frame, text="Reset Zoom", command=reset_zoom)
 btn_reset.pack(side="left", padx=10)
 

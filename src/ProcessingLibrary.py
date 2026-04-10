@@ -45,7 +45,6 @@ def process_tdt_folder(folder_path):
         p = np.polyfit(y_415, y_465, 1)
         y_fit = np.polyval(p, y_415)
 
-        # SAFE subtraction (DO NOT divide here)
         y_final = y_465 - y_fit
         display_name = f"Corrected {name_465} (via {name_415})"
 
@@ -54,27 +53,18 @@ def process_tdt_folder(folder_path):
         display_name = f"{name_465} (Uncorrected)"
 
     # -------------------------
-    # BLEACHING (trend removal)
+    # BLEACHING MODEL (baseline)
     # -------------------------
-    y_detrended, trend = correct_bleaching(y_final, fs)
+    _, trend = correct_bleaching(y_final, fs)
 
     # -------------------------
-    # ΔF/F NORMALIZATION (correct place)
+    # ΔF/F NORMALIZATION
     # -------------------------
-    f0 = trend  # use fitted baseline as F0
+    f0 = np.maximum(trend, 1e-6)
     dff = (y_final - f0) / f0
 
     # -------------------------
-    # REMOVE WARM-UP (fixes fuzzy start)
-    # -------------------------
-    start_idx = int(30 * fs)
-
-    dff = dff[start_idx:]
-    f0 = f0[start_idx:]
-    x = x[start_idx:]
-
-    # -------------------------
-    # DENOISING STEP
+    # DENOISING
     # -------------------------
     dff = denoise_signal(dff, fs, cutoff=5)
 
@@ -84,13 +74,13 @@ def process_tdt_folder(folder_path):
     return {
         "x": x,
         "raw": y_final,
-        "corr": dff,   # <-- ADD THIS LINE (compatibility)
+        "corr": dff,
         "dff": dff,
         "f0": f0,
         "fs": fs,
         "store": display_name,
         "markers": get_event_markers(data_struct)
-        }
+    }
 
 def double_exponential(x, a, b, c, d, k):
     """Literature-standard model for photo-bleaching decay."""
@@ -191,32 +181,31 @@ def get_event_markers(data):
     return markers
 
 def get_zscore_slice(time_array, signal, center_t, window=30):
-    start_idx = np.searchsorted(time_array, center_t - window)
-    end_idx = np.searchsorted(time_array, center_t + window)
+    
+    half_win = window / 2
+
+    start_idx = np.searchsorted(time_array, center_t - half_win)
+    end_idx = np.searchsorted(time_array, center_t + half_win)
     
     seg_y = signal[start_idx:end_idx]
     seg_x = time_array[start_idx:end_idx]
 
-    # 1. THE ARTIFACT CLIPPER
-    # Brains rarely go above 15-20 Z-scores. 
-    # If the raw dF/F is over 100%, it's almost certainly a cable bump.
-    seg_y = np.clip(seg_y, -1.0, 1.0) # Limits raw dF/F to 100% change
+    # 1. REMOVE HARD CLIPPING (replace with soft guard)
+    seg_y = np.clip(seg_y, -5, 5)  # much safer for ΔF/F
 
-    # 2. Baseline Calculation
-    baseline_split = len(seg_y) // 2
-    baseline_period = seg_y[:baseline_split]
-    
+    # 2. BASELINE = PRE-EVENT ONLY
+    baseline_end = len(seg_y) // 2
+    baseline_period = seg_y[:baseline_end]
+
     mu = np.mean(baseline_period)
     std = np.std(baseline_period)
-    
-    # 3. Handle the "Absolute Mess" (High Noise)
-    # If the baseline is too noisy (std is huge), we can flag it
-    if std > 0.5: # Adjust this threshold based on your typical noise
-        print(f"Warning: High noise detected at {center_t}s. Result may be messy.")
 
-    if std == 0: return seg_x, np.zeros_like(seg_y)
-    
+    # 3. STABILITY GUARD
+    if std < 1e-6:
+        return seg_x, np.zeros_like(seg_y)
+
     z_scored_seg = (seg_y - mu) / std
+
     return seg_x, z_scored_seg
 
 def smooth_signal(data, fs, window_sec=0.5):
