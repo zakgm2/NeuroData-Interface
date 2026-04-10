@@ -2,12 +2,11 @@ import tkinter as tk
 from tkinter import filedialog
 import os
 import ProcessingLibrary
-import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.widgets import RectangleSelector
 import datetime
-
+import numpy as np
 
 
 #####################        
@@ -193,17 +192,20 @@ def launch_zscore_peth(center_t):
         fig_peth = Figure(figsize=(8, 7), dpi=100)
         ax_heat, ax_line = fig_peth.subplots(2, 1, sharex=True, gridspec_kw={'height_ratios': [1, 1]})
         
-        # 3. HEATMAP PLOT
+        # 3. HEATMAP PLOT (Dynamic Scaling)
+        v_min, v_max = np.min(z_seg), np.max(z_seg)
+        
         ax_heat.imshow(z_binned.reshape(1, -1), aspect='auto', cmap='YlGnBu_r', 
-                       extent=[-30, 30, 0, 1], vmin=-5, vmax=5, interpolation='bilinear') 
+                        extent=[-15, 15, 0, 1], vmin=v_min, vmax=v_max, 
+                        interpolation='bilinear') 
         ax_heat.set_yticks([]) 
         ax_heat.set_ylabel("Intensity", fontweight='bold')
         
-        # 4. LINE PLOT
+        # 4. LINE PLOT (Connected Z-Score)
         ax_line.plot(slice_x - center_t, z_seg, color='black', linewidth=1.5) 
         ax_line.axvline(0, color='red', linestyle='--', alpha=0.8)
-        ax_line.set_xlim([-30, 30])
-        ax_line.set_ylim([-5, 5])
+        ax_line.set_xlim([-15, 15])
+        ax_line.set_ylim([v_min * 1.1 if v_min < 0 else -1, v_max * 1.1])
         ax_line.set_ylabel(f"Z-Score ({mode_str})", fontweight='bold')
         ax_line.set_xlabel("Time from Center (s)", fontweight='bold')
         
@@ -330,35 +332,52 @@ def choose_file():
 #LOADING THE DATA INTO THE GUI
 def load_data_action():
     global cache
+    
+    # 1. Validation: Ensure a path exists before trying to process
     if folder_path is None:
         show_error("Please select a folder first!")
         return
 
     try:
-        # One call to the library handles the entire science pipeline
+        # 2. Handshake: Call the library and store the result in the global cache
+        # This now receives the 'Corrected 465nm' store name we set in the library
         cache = ProcessingLibrary.process_tdt_folder(folder_path)
         
-        msg = f"Loaded {cache['store']} ({cache['fs']:.1f} Hz)"
+        # 3. UI Update: Inform the user exactly what was processed
+        # cache['store'] will now say "465nm (Corrected dF/F)" instead of "_415A"
+        msg = f"Successfully Loaded: {cache['store']}\nSampling Rate: {cache['fs']:.2f} Hz"
         show_success(msg)
         
-        # Trigger the initial plot
-        simple_plot() 
+        # 4. Rendering: Force the graph to update with the new data
+        # We pass draw_now=True to ensure the canvas refreshes immediately
+        simple_plot(draw_now=True) 
         
     except Exception as e:
+        # Catching any library-side errors (e.g., missing 465A stream)
         show_error(f"Processing Failed: {str(e)}")
 
 #LOADING THE DATA IN THE GUI
 def load_data_set():
     """
     The 'Master Trigger' for the data pipeline.
-    Combines folder selection and automated processing into one action.
+    Wipes old data and forces a fresh library call to update labels.
     """
-    # 1. Open the dialog (Updates 'folder_path' if successful)
+    global cache
+    
+    # 1. Reset the cache to clear any "415 Ghosts"
+    cache = None 
+    
+    # 2. Open the dialog
     choose_file()
     
-    # 2. Only proceed to load if the user didn't cancel the dialog
+    # 3. Only proceed if folder_path was actually set
     if folder_path:
+        # We call load_data_action which calls the library
         load_data_action()
+        
+        # 4. FINAL FORCE: Update the window title to show the new store
+        if cache:
+            root.title(f"NeuroData Interface - Viewing: {cache['store']}")
 
 #ADDS NOTES TO THE PLOT
 def _update_plot_with_notes(markers):
@@ -391,36 +410,33 @@ def _update_plot_with_notes(markers):
 
 #PLOT CORRECTED FOR BLEACHING        
 def simple_plot(draw_now=True):
-    # 1. Safety Check: Use the clean 'is None' check
     if cache is None: return
     
-    
-    # 2. Reset the canvas
     ax.clear()
     
-    # 3. Pull from Cache (Zero calculation here = High Performance)
+    # 3. Pull Data
     data_to_plot = cache['corr'] if show_corrected else cache['raw']
-    label_text = "Debleached Signal" if show_corrected else "Raw Fluorescence"
-    color_choice = "blue" if show_corrected else "gray" # Blue vs Gray
+    label_text = "Debleached" if show_corrected else "Motion-Corrected"
+    color_choice = "blue" if show_corrected else "gray"
 
-    # Horizontal line at 0 (Amplitude)
+    # Lines at zero
     ax.axhline(0, color='black', linewidth=1.2, alpha=0.5, zorder=1)
-    # Vertical line at 0 (Time start)
     ax.axvline(0, color='black', linewidth=1.2, alpha=0.5, zorder=1)
     
+    # 5. Plot
+    ax.plot(cache['x'], data_to_plot, color=color_choice, lw=1, alpha=0.8)
     
-    # 5. The Main Trace
-    ax.plot(cache['x'], data_to_plot, color=color_choice, lw=1, alpha=0.8, label=label_text)
-    
-    # 6. Metadata Overlay
+    # 6. Metadata Overlay (Check if THIS is changing the title!)
     _update_plot_with_notes(cache['markers'])
     
-    # 7. Aesthetics & Legend
-    ax.set_title(f"{label_text} - {cache['store']}", fontweight='bold', pad=15)
-    ax.set_ylabel("Amplitude")
+    # 7. Aesthetics - MOVED TO BOTTOM
+    # We use a forced f-string to ensure the cache value is current
+    current_store = str(cache.get('store', 'Unknown Store'))
+    ax.set_title(f"{label_text} Signal - {current_store}", fontweight='bold', pad=15)
+    
+    ax.set_ylabel(r"$\Delta F / F$ (normalized)")
     ax.set_xlabel("Time (s)")
     
-    # Only draw if we aren't mid-toggle
     if draw_now:
         canvas.draw()
 

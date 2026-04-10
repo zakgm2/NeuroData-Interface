@@ -2,6 +2,7 @@ import tdt
 import numpy as np
 from scipy.optimize import curve_fit
 import os
+from scipy.ndimage import percentile_filter
 
 def validate_tdt_folder(path):
     """
@@ -20,36 +21,46 @@ def validate_tdt_folder(path):
         return False, "Invalid Folder: No TDT block files (.Tbk) found."
 
 def process_tdt_folder(folder_path):
-    """
-    High-level pipeline: Loads, extracts, debleaches, and finds markers.
-    Returns a dictionary of all processed data.
-    """
-    # 1. Load raw structure
     data_struct = get_tdt_struct(folder_path)
-    
-    # 2. Extract first available stream
-    store_name = list(data_struct.streams.keys())[0]
-    x, y_raw, fs = get_plot_data(data_struct, store_name)
-    
-    # 3. Science: Apply debleaching
-    y_corr, trend = correct_bleaching(y_raw, fs)
-    
-    # 4. Metadata: Get event markers
-    markers = get_event_markers(data_struct)
-    
+    streams = data_struct.streams.keys()
+
+    # 1. THE FUZZY HUNT: Look for anything containing '465' and '415'
+    name_465 = next((s for s in streams if '465' in s), None)
+    name_415 = next((s for s in streams if '415' in s), None)
+
+    if name_465:
+        if name_415:
+            # We found both! Perform the math.
+            x, y_465, fs = get_plot_data(data_struct, name_465)
+            _, y_415, _ = get_plot_data(data_struct, name_415)
+            
+            p = np.polyfit(y_415, y_465, 1)
+            y_fitted = np.polyval(p, y_415)
+            y_final = (y_465 - y_fitted) / y_fitted
+            display_name = f"Corrected {name_465} (via {name_415})"
+        else:
+            # Found 465 but no 415 control
+            x, y_final, fs = get_plot_data(data_struct, name_465)
+            display_name = f"{name_465} (Uncorrected)"
+    else:
+        # Emergency Fallback
+        fallback_key = list(streams)[0]
+        x, y_final, fs = get_plot_data(data_struct, fallback_key)
+        display_name = f"CRITICAL: No 465 found. Showing {fallback_key}"
+
+    # ... (Rest of debleaching and markers) ...
+    y_corr, trend = correct_bleaching(y_final, fs)
     return {
-        'x': x, 
-        'raw': y_raw, 
-        'corr': y_corr, 
-        'trend': trend,
-        'fs': fs,
-        'store': store_name,
-        'markers': markers
+        'x': x, 'raw': y_final, 'corr': y_corr, 
+        'trend': trend, 'fs': fs, 
+        'store': display_name, 
+        'markers': get_event_markers(data_struct)
     }
 
 def double_exponential(x, a, b, c, d, k):
     """Literature-standard model for photo-bleaching decay."""
     return a * np.exp(-b * x) + c * np.exp(-d * x) + k
+
 
 def get_tdt_struct(path):
     "Makes a Struct From the Binary TDT folder"
@@ -83,42 +94,29 @@ def get_plot_data(data, store_name, channel=0, max_points=None):
     
     return x, y, fs
 
-def correct_bleaching(y, fs):
-    """
-    Corrects bleaching using a masked double-exponential fit.
-    Returns: (corrected_data, trend_line)
-    """
-    x = np.arange(len(y)) / fs
-    
-    # 1. MASKING: Ignore signal dips (motion/artifacts) to fit only the baseline
-    threshold = np.median(y) 
-    mask = y > threshold
-    x_fit, y_fit = x[mask], y[mask]
 
-    if len(y_fit) < 100:
-        return y, np.zeros_like(y)
+def correct_bleaching(y, fs, window_sec=60, percentile=10):
+    # 1. DECIMATE: Work with 1/10th of the data to find the floor
+    # This makes the calculation 10x faster and stops the freeze
+    factor = 10 
+    y_small = y[::factor]
+    fs_small = fs / factor
+    window_size_small = int(window_sec * fs_small)
 
-    # 2. HEURISTIC GUESSING: Makes the fit converge faster/more reliably
-    k_guess = np.percentile(y_fit, 10) 
-    total_amp = np.max(y_fit) - k_guess
-    p0 = [total_amp*0.6, 0.05, total_amp*0.4, 0.0001, k_guess]
-    
-    # 3. CONSTRAINED OPTIMIZATION: Prevents the curve from 'diving' to zero
-    lower = [0, 0, 0, 0, k_guess * 0.8]
-    upper = [np.inf, 1, np.inf, 0.1, np.max(y_fit)]
+    # 2. CALCULATE baseline on the small data
+    f0_small = percentile_filter(y_small, percentile=percentile, size=window_size_small)
 
-    try:
-        popt, _ = curve_fit(double_exponential, x_fit, y_fit, p0=p0, 
-                            bounds=(lower, upper), maxfev=10000)
-        trend = double_exponential(x, *popt)
-    except Exception:
-        # Fallback to single exponential via log-linear fit if optimization fails
-        coeffs = np.polyfit(x_fit, np.log(np.maximum(y_fit, 1e-6)), 1)
-        trend = np.exp(np.polyval(coeffs, x))
+    # 3. INTERPOLATE: Stretch the baseline back to full size
+    x_small = np.arange(len(f0_small)) * factor
+    x_full = np.arange(len(y))
+    f0 = np.interp(x_full, x_small, f0_small)
 
-    # 4. NORMALIZATION: Centers the data around the mean of the fit-segment
-    corrected = y - trend + trend[0]
-    return corrected, trend
+    # 4. FINISH
+    eps = 1e-9
+    corrected = (y - f0) / (f0 + eps)
+    return corrected, f0
+
+
 
 def get_event_markers(data):
     """
@@ -145,23 +143,35 @@ def get_event_markers(data):
         })
     return markers
 
-def get_zscore_slice(x, y, center_time, window=30):
-    start_t, end_t = center_time - window, center_time + window
+def get_zscore_slice(time_array, signal, center_t, window=30):
+    half_win = window / 2
+    start_idx = np.searchsorted(time_array, center_t - half_win)
+    end_idx = np.searchsorted(time_array, center_t + half_win)
     
-    mask = (x >= start_t) & (x <= end_t)
-    slice_x = x[mask]
-    slice_y = y[mask]
+    seg_y = signal[start_idx:end_idx]
+    seg_x = time_array[start_idx:end_idx]
+
+    # 1. THE ARTIFACT CLIPPER
+    # Brains rarely go above 15-20 Z-scores. 
+    # If the raw dF/F is over 100%, it's almost certainly a cable bump.
+    seg_y = np.clip(seg_y, -1.0, 1.0) # Limits raw dF/F to 100% change
+
+    # 2. Baseline Calculation
+    baseline_split = len(seg_y) // 2
+    baseline_period = seg_y[:baseline_split]
     
-    if len(slice_y) < 2: # Need at least 2 points for std dev
-        return None, None
+    mu = np.mean(baseline_period)
+    std = np.std(baseline_period)
     
-    mean_val = np.mean(slice_y)
-    std_val = np.std(slice_y)
+    # 3. Handle the "Absolute Mess" (High Noise)
+    # If the baseline is too noisy (std is huge), we can flag it
+    if std > 0.5: # Adjust this threshold based on your typical noise
+        print(f"Warning: High noise detected at {center_t}s. Result may be messy.")
+
+    if std == 0: return seg_x, np.zeros_like(seg_y)
     
-    # Use a tiny epsilon (1e-9) to avoid true division by zero errors
-    z_slice = (slice_y - mean_val) / (std_val if std_val > 0 else 1e-9)
-    
-    return slice_x, z_slice
+    z_scored_seg = (seg_y - mu) / std
+    return seg_x, z_scored_seg
 
 def smooth_signal(data, fs, window_sec=0.5):
     """Calculates a moving average smoothed signal."""
