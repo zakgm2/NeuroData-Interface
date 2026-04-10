@@ -54,9 +54,15 @@ def process_tdt_folder(folder_path):
         display_name = f"{name_465} (Uncorrected)"
 
     # -------------------------
-    # ΔF/F BLEACHING CORRECTION
+    # BLEACHING (trend removal)
     # -------------------------
-    dff, f0 = correct_bleaching(y_final, fs)
+    y_detrended, trend = correct_bleaching(y_final, fs)
+
+    # -------------------------
+    # ΔF/F NORMALIZATION (correct place)
+    # -------------------------
+    f0 = trend  # use fitted baseline as F0
+    dff = (y_final - f0) / f0
 
     # -------------------------
     # REMOVE WARM-UP (fixes fuzzy start)
