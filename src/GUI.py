@@ -3,7 +3,6 @@ import tkinter as tk
 from tkinter import filedialog
 import os
 import ProcessingLibrary
-import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.widgets import RectangleSelector
@@ -203,7 +202,7 @@ def launch_zscore_peth(center_t):
         # 4. LINE PLOT
         ax_line.plot(slice_x - center_t, z_seg, color='black', linewidth=1.5) 
         ax_line.axvline(0, color='red', linestyle='--', alpha=0.8)
-        ax_line.set_xlim([-30, 30])
+        ax_line.set_xlim([-15, 15])
         ax_line.set_ylim([-5, 5])
         ax_line.set_ylabel(f"Z-Score ({mode_str})", fontweight='bold')
         ax_line.set_xlabel("Time from Center (s)", fontweight='bold')

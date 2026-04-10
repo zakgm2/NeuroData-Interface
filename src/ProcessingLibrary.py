@@ -1,6 +1,7 @@
 import tdt
 import numpy as np
 from scipy.optimize import curve_fit
+from scipy.signal import butter, filtfilt
 import os
 
 def validate_tdt_folder(path):
@@ -20,41 +21,70 @@ def validate_tdt_folder(path):
         return False, "Invalid Folder: No TDT block files (.Tbk) found."
 
 def process_tdt_folder(folder_path):
+
     data_struct = get_tdt_struct(folder_path)
     streams = data_struct.streams.keys()
 
-    # 1. THE FUZZY HUNT: Look for anything containing '465' and '415'
     name_465 = next((s for s in streams if '465' in s), None)
     name_415 = next((s for s in streams if '415' in s), None)
 
-    if name_465:
-        if name_415:
-            # We found both! Perform the math.
-            x, y_465, fs = get_plot_data(data_struct, name_465)
-            _, y_415, _ = get_plot_data(data_struct, name_415)
-            
-            p = np.polyfit(y_415, y_465, 1)
-            y_fitted = np.polyval(p, y_415)
-            y_final = (y_465 - y_fitted) / y_fitted
-            display_name = f"Corrected {name_465} (via {name_415})"
-        else:
-            # Found 465 but no 415 control
-            x, y_final, fs = get_plot_data(data_struct, name_465)
-            display_name = f"{name_465} (Uncorrected)"
-    else:
-        # Emergency Fallback
-        fallback_key = list(streams)[0]
-        x, y_final, fs = get_plot_data(data_struct, fallback_key)
-        display_name = f"CRITICAL: No 465 found. Showing {fallback_key}"
+    if not name_465:
+        raise ValueError("No 465 signal found")
 
-    # ... (Rest of debleaching and markers) ...
-    y_corr, trend = correct_bleaching(y_final, fs)
+    # -------------------------
+    # LOAD DATA
+    # -------------------------
+    x, y_465, fs = get_plot_data(data_struct, name_465)
+
+    # -------------------------
+    # 415 REGRESSION CORRECTION
+    # -------------------------
+    if name_415:
+        _, y_415, _ = get_plot_data(data_struct, name_415)
+
+        p = np.polyfit(y_415, y_465, 1)
+        y_fit = np.polyval(p, y_415)
+
+        # SAFE subtraction (DO NOT divide here)
+        y_final = y_465 - y_fit
+        display_name = f"Corrected {name_465} (via {name_415})"
+
+    else:
+        y_final = y_465
+        display_name = f"{name_465} (Uncorrected)"
+
+    # -------------------------
+    # ΔF/F BLEACHING CORRECTION
+    # -------------------------
+    dff, f0 = correct_bleaching(y_final, fs)
+
+    # -------------------------
+    # REMOVE WARM-UP (fixes fuzzy start)
+    # -------------------------
+    start_idx = int(30 * fs)
+
+    dff = dff[start_idx:]
+    f0 = f0[start_idx:]
+    x = x[start_idx:]
+
+    # -------------------------
+    # DENOISING STEP
+    # -------------------------
+    dff = denoise_signal(dff, fs, cutoff=5)
+
+    # -------------------------
+    # OUTPUT
+    # -------------------------
     return {
-        'x': x, 'raw': y_final, 'corr': y_corr, 
-        'trend': trend, 'fs': fs, 
-        'store': display_name, 
-        'markers': get_event_markers(data_struct)
-    }
+        "x": x,
+        "raw": y_final,
+        "corr": dff,   # <-- ADD THIS LINE (compatibility)
+        "dff": dff,
+        "f0": f0,
+        "fs": fs,
+        "store": display_name,
+        "markers": get_event_markers(data_struct)
+        }
 
 def double_exponential(x, a, b, c, d, k):
     """Literature-standard model for photo-bleaching decay."""
@@ -194,3 +224,18 @@ def bin_for_heatmap(z_seg, num_bins=300):
     if z_seg is None or len(z_seg) == 0: return np.zeros(num_bins)
     bin_edges = np.linspace(0, len(z_seg), num_bins + 1).astype(int)
     return np.array([np.mean(z_seg[bin_edges[i]:bin_edges[i+1]]) for i in range(num_bins)])
+
+def denoise_signal(signal, fs, cutoff=5, order=2):
+    """
+    Light low-pass filter for photometry ΔF/F signals.
+
+    cutoff: Hz (5 Hz is standard safe range for behavior tasks)
+    """
+
+    nyquist = fs / 2
+    normal_cutoff = cutoff / nyquist
+
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    filtered = filtfilt(b, a, signal)
+
+    return filtered
