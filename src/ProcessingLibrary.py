@@ -2,7 +2,6 @@ import tdt
 import numpy as np
 from scipy.optimize import curve_fit
 import os
-from scipy.ndimage import percentile_filter
 
 def validate_tdt_folder(path):
     """
@@ -61,7 +60,6 @@ def double_exponential(x, a, b, c, d, k):
     """Literature-standard model for photo-bleaching decay."""
     return a * np.exp(-b * x) + c * np.exp(-d * x) + k
 
-
 def get_tdt_struct(path):
     "Makes a Struct From the Binary TDT folder"
     data = tdt.read_block(path)
@@ -94,29 +92,42 @@ def get_plot_data(data, store_name, channel=0, max_points=None):
     
     return x, y, fs
 
+def correct_bleaching(y, fs):
+    """
+    Corrects bleaching using a masked double-exponential fit.
+    Returns: (corrected_data, trend_line)
+    """
+    x = np.arange(len(y)) / fs
+    
+    # 1. MASKING: Ignore signal dips (motion/artifacts) to fit only the baseline
+    threshold = np.median(y) 
+    mask = y > threshold
+    x_fit, y_fit = x[mask], y[mask]
 
-def correct_bleaching(y, fs, window_sec=60, percentile=10):
-    # 1. DECIMATE: Work with 1/10th of the data to find the floor
-    # This makes the calculation 10x faster and stops the freeze
-    factor = 10 
-    y_small = y[::factor]
-    fs_small = fs / factor
-    window_size_small = int(window_sec * fs_small)
+    if len(y_fit) < 100:
+        return y, np.zeros_like(y)
 
-    # 2. CALCULATE baseline on the small data
-    f0_small = percentile_filter(y_small, percentile=percentile, size=window_size_small)
+    # 2. HEURISTIC GUESSING: Makes the fit converge faster/more reliably
+    k_guess = np.percentile(y_fit, 10) 
+    total_amp = np.max(y_fit) - k_guess
+    p0 = [total_amp*0.6, 0.05, total_amp*0.4, 0.0001, k_guess]
+    
+    # 3. CONSTRAINED OPTIMIZATION: Prevents the curve from 'diving' to zero
+    lower = [0, 0, 0, 0, k_guess * 0.8]
+    upper = [np.inf, 1, np.inf, 0.1, np.max(y_fit)]
 
-    # 3. INTERPOLATE: Stretch the baseline back to full size
-    x_small = np.arange(len(f0_small)) * factor
-    x_full = np.arange(len(y))
-    f0 = np.interp(x_full, x_small, f0_small)
+    try:
+        popt, _ = curve_fit(double_exponential, x_fit, y_fit, p0=p0, 
+                            bounds=(lower, upper), maxfev=10000)
+        trend = double_exponential(x, *popt)
+    except Exception:
+        # Fallback to single exponential via log-linear fit if optimization fails
+        coeffs = np.polyfit(x_fit, np.log(np.maximum(y_fit, 1e-6)), 1)
+        trend = np.exp(np.polyval(coeffs, x))
 
-    # 4. FINISH
-    eps = 1e-9
-    corrected = (y - f0) / (f0 + eps)
-    return corrected, f0
-
-
+    # 4. NORMALIZATION: Centers the data around the mean of the fit-segment
+    corrected = y - trend + trend[0]
+    return corrected, trend
 
 def get_event_markers(data):
     """
@@ -144,9 +155,8 @@ def get_event_markers(data):
     return markers
 
 def get_zscore_slice(time_array, signal, center_t, window=30):
-    half_win = window / 2
-    start_idx = np.searchsorted(time_array, center_t - half_win)
-    end_idx = np.searchsorted(time_array, center_t + half_win)
+    start_idx = np.searchsorted(time_array, center_t - window)
+    end_idx = np.searchsorted(time_array, center_t + window)
     
     seg_y = signal[start_idx:end_idx]
     seg_x = time_array[start_idx:end_idx]
