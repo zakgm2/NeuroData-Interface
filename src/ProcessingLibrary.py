@@ -1,6 +1,7 @@
 import tdt
 import numpy as np
 from scipy.optimize import curve_fit
+from scipy.signal import butter, filtfilt
 import os
 
 def validate_tdt_folder(path):
@@ -20,31 +21,65 @@ def validate_tdt_folder(path):
         return False, "Invalid Folder: No TDT block files (.Tbk) found."
 
 def process_tdt_folder(folder_path):
-    """
-    High-level pipeline: Loads, extracts, debleaches, and finds markers.
-    Returns a dictionary of all processed data.
-    """
-    # 1. Load raw structure
+
     data_struct = get_tdt_struct(folder_path)
-    
-    # 2. Extract first available stream
-    store_name = list(data_struct.streams.keys())[0]
-    x, y_raw, fs = get_plot_data(data_struct, store_name)
-    
-    # 3. Science: Apply debleaching
-    y_corr, trend = correct_bleaching(y_raw, fs)
-    
-    # 4. Metadata: Get event markers
-    markers = get_event_markers(data_struct)
-    
+    streams = data_struct.streams.keys()
+
+    name_465 = next((s for s in streams if '465' in s), None)
+    name_415 = next((s for s in streams if '415' in s), None)
+
+    if not name_465:
+        raise ValueError("No 465 signal found")
+
+    # -------------------------
+    # LOAD DATA
+    # -------------------------
+    x, y_465, fs = get_plot_data(data_struct, name_465)
+
+    # -------------------------
+    # 415 REGRESSION CORRECTION
+    # -------------------------
+    if name_415:
+        _, y_415, _ = get_plot_data(data_struct, name_415)
+
+        p = np.polyfit(y_415, y_465, 1)
+        y_fit = np.polyval(p, y_415)
+
+        y_final = y_465 - y_fit
+        display_name = f"Corrected {name_465} (via {name_415})"
+
+    else:
+        y_final = y_465
+        display_name = f"{name_465} (Uncorrected)"
+
+    # -------------------------
+    # BLEACHING MODEL (baseline)
+    # -------------------------
+    _, trend = correct_bleaching(y_final, fs)
+
+    # -------------------------
+    # ΔF/F NORMALIZATION
+    # -------------------------
+    f0 = np.maximum(trend, 1e-6)
+    dff = (y_final - f0) / f0
+
+    # -------------------------
+    # DENOISING
+    # -------------------------
+    dff = denoise_signal(dff, fs, cutoff=5)
+
+    # -------------------------
+    # OUTPUT
+    # -------------------------
     return {
-        'x': x, 
-        'raw': y_raw, 
-        'corr': y_corr, 
-        'trend': trend,
-        'fs': fs,
-        'store': store_name,
-        'markers': markers
+        "x": x,
+        "raw": y_final,
+        "corr": dff,
+        "dff": dff,
+        "f0": f0,
+        "fs": fs,
+        "store": display_name,
+        "markers": get_event_markers(data_struct)
     }
 
 def double_exponential(x, a, b, c, d, k):
@@ -145,23 +180,33 @@ def get_event_markers(data):
         })
     return markers
 
-def get_zscore_slice(x, y, center_time, window=30):
-    start_t, end_t = center_time - window, center_time + window
+def get_zscore_slice(time_array, signal, center_t, window=30):
     
-    mask = (x >= start_t) & (x <= end_t)
-    slice_x = x[mask]
-    slice_y = y[mask]
+    half_win = window / 2
+
+    start_idx = np.searchsorted(time_array, center_t - half_win)
+    end_idx = np.searchsorted(time_array, center_t + half_win)
     
-    if len(slice_y) < 2: # Need at least 2 points for std dev
-        return None, None
-    
-    mean_val = np.mean(slice_y)
-    std_val = np.std(slice_y)
-    
-    # Use a tiny epsilon (1e-9) to avoid true division by zero errors
-    z_slice = (slice_y - mean_val) / (std_val if std_val > 0 else 1e-9)
-    
-    return slice_x, z_slice
+    seg_y = signal[start_idx:end_idx]
+    seg_x = time_array[start_idx:end_idx]
+
+    # 1. REMOVE HARD CLIPPING (replace with soft guard)
+    seg_y = np.clip(seg_y, -5, 5)  # much safer for ΔF/F
+
+    # 2. BASELINE = PRE-EVENT ONLY
+    baseline_end = len(seg_y) // 2
+    baseline_period = seg_y[:baseline_end]
+
+    mu = np.mean(baseline_period)
+    std = np.std(baseline_period)
+
+    # 3. STABILITY GUARD
+    if std < 1e-6:
+        return seg_x, np.zeros_like(seg_y)
+
+    z_scored_seg = (seg_y - mu) / std
+
+    return seg_x, z_scored_seg
 
 def smooth_signal(data, fs, window_sec=0.5):
     """Calculates a moving average smoothed signal."""
@@ -174,3 +219,18 @@ def bin_for_heatmap(z_seg, num_bins=300):
     if z_seg is None or len(z_seg) == 0: return np.zeros(num_bins)
     bin_edges = np.linspace(0, len(z_seg), num_bins + 1).astype(int)
     return np.array([np.mean(z_seg[bin_edges[i]:bin_edges[i+1]]) for i in range(num_bins)])
+
+def denoise_signal(signal, fs, cutoff=5, order=2):
+    """
+    Light low-pass filter for photometry ΔF/F signals.
+
+    cutoff: Hz (5 Hz is standard safe range for behavior tasks)
+    """
+
+    nyquist = fs / 2
+    normal_cutoff = cutoff / nyquist
+
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    filtered = filtfilt(b, a, signal)
+
+    return filtered

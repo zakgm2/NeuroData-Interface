@@ -3,7 +3,16 @@
 
 An open-source, platform-agnostic Python library and GUI designed for analyzing fiber photometry data. Developed at **Concordia University**, this tool provides a streamlined workflow for debleaching, signal processing, and Peri-Event Time Histogram (PETH) visualization.
 
----
+### Pipeline:
+
+-> Motion Artifact Correction 
+
+-> Photobleaching Correction (Double Exponential Model giving baseline) 
+ 
+-> Normalization 
+ 
+-> Denoising 
+
 
 ##  Key Features
 * **Platform Agnostic:** Fully functional on **macOS**, Windows, and Linux.
