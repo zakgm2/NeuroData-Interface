@@ -6,8 +6,19 @@ import os
 
 def validate_tdt_folder(path):
     """
-    Checks if a directory is a valid TDT data folder.
-    Returns: (bool, folder_name or error_msg)
+    Validate whether a directory contains a TDT recording block.
+
+    Parameters
+    ----------
+    path : str
+        Path to the TDT data folder.
+
+    Returns
+    -------
+    tuple
+        (bool, str)
+        - True + folder name if valid
+        - False + error message if invalid
     """
     if not path:
         return False, "No folder selected."
@@ -21,7 +32,36 @@ def validate_tdt_folder(path):
         return False, "Invalid Folder: No TDT block files (.Tbk) found."
 
 def process_tdt_folder(folder_path):
+    """
+    Full photometry processing pipeline for a TDT recording.
 
+    Steps:
+    1. Load TDT block
+    2. Extract 465 nm (signal) and optional 415 nm (reference)
+    3. Perform regression-based motion correction
+    4. Correct photobleaching trend
+    5. Compute ΔF/F
+    6. Denoise signal
+    7. Extract event markers
+
+    Parameters
+    ----------
+    folder_path : str
+        Path to TDT recording folder.
+
+    Returns
+    -------
+    dict
+        Processed signals and metadata:
+        - x: time vector
+        - raw: corrected fluorescence signal
+        - corr: final ΔF/F (denoised)
+        - dff: same as corr (alias)
+        - f0: bleaching baseline
+        - fs: sampling frequency
+        - store: signal label
+        - markers: behavioral event markers
+    """
     data_struct = get_tdt_struct(folder_path)
     streams = data_struct.streams.keys()
 
@@ -83,11 +123,37 @@ def process_tdt_folder(folder_path):
     }
 
 def double_exponential(x, a, b, c, d, k):
-    """Literature-standard model for photo-bleaching decay."""
+    """
+    Double exponential decay model for photobleaching correction.
+
+    Parameters
+    ----------
+    x : array
+        Time vector
+    a, b, c, d, k : float
+        Model parameters
+
+    Returns
+    -------
+    array
+        Fitted bleaching trend
+    """
     return a * np.exp(-b * x) + c * np.exp(-d * x) + k
 
 def get_tdt_struct(path):
-    "Makes a Struct From the Binary TDT folder"
+    """
+    Load a Tucker-Davis Technologies (TDT) recording block.
+
+    Parameters
+    ----------
+    path : str
+        Folder containing TDT data.
+
+    Returns
+    -------
+    object
+        Parsed TDT data structure.
+    """
     data = tdt.read_block(path)
     if data is None:
         raise Exception("TDT returned an empty object.")
@@ -96,7 +162,25 @@ def get_tdt_struct(path):
     return data
 
 def get_plot_data(data, store_name, channel=0, max_points=None):
-    "Get Data From Struct"
+    """
+    Extract time-series data from a TDT stream.
+
+    Parameters
+    ----------
+    data : object
+        TDT data structure
+    store_name : str
+        Stream name (e.g., 'x465A')
+    channel : int
+        Channel index
+    max_points : int or None
+        Optional downsampling limit
+
+    Returns
+    -------
+    tuple
+        (time array, signal array, sampling frequency)
+    """
     stream = data.streams[store_name]
     fs = stream.fs
     
@@ -120,8 +204,14 @@ def get_plot_data(data, store_name, channel=0, max_points=None):
 
 def correct_bleaching(y, fs):
     """
-    Corrects bleaching using a masked double-exponential fit.
-    Returns: (corrected_data, trend_line)
+    Estimate and correct photobleaching using masked curve fitting.
+
+    Returns:
+    --------
+    corrected : array
+        Bleaching-corrected signal
+    trend : array
+        Estimated baseline trend
     """
     x = np.arange(len(y)) / fs
     
@@ -157,8 +247,17 @@ def correct_bleaching(y, fs):
 
 def get_event_markers(data):
     """
-    Returns a list of dictionaries for every note found in the TDT file.
+    Extract behavioral event markers from TDT epoc data.
+
+    Returns:
+    --------
+    list of dict
+        Each dict contains:
+        - time
+        - label
+        - color
     """
+
     if not hasattr(data.epocs, 'Note'):
         return []
     
@@ -181,7 +280,13 @@ def get_event_markers(data):
     return markers
 
 def get_zscore_slice(time_array, signal, center_t, window=30):
-    
+    """
+    Extract and z-score a time window around an event.
+
+    Returns:
+    --------
+    (time segment, z-scored signal)
+    """
     half_win = window / 2
 
     start_idx = np.searchsorted(time_array, center_t - half_win)
@@ -209,22 +314,34 @@ def get_zscore_slice(time_array, signal, center_t, window=30):
     return seg_x, z_scored_seg
 
 def smooth_signal(data, fs, window_sec=0.5):
-    """Calculates a moving average smoothed signal."""
+    """
+    Moving average smoothing filter.
+    """
     window_size = int(fs * window_sec)
     if window_size % 2 == 0: window_size += 1
     return np.convolve(data, np.ones(window_size)/window_size, mode='same')
 
 def bin_for_heatmap(z_seg, num_bins=300):
-    """Calculates the averages for the heatmap bins."""
+    """
+    Bin a signal into equal segments for heatmap plotting.
+    """
     if z_seg is None or len(z_seg) == 0: return np.zeros(num_bins)
     bin_edges = np.linspace(0, len(z_seg), num_bins + 1).astype(int)
     return np.array([np.mean(z_seg[bin_edges[i]:bin_edges[i+1]]) for i in range(num_bins)])
 
 def denoise_signal(signal, fs, cutoff=5, order=2):
     """
-    Light low-pass filter for photometry ΔF/F signals.
+    Low-pass Butterworth filter for ΔF/F signals.
 
-    cutoff: Hz (5 Hz is standard safe range for behavior tasks)
+    Parameters:
+    -----------
+    cutoff : float
+        Cutoff frequency in Hz
+
+    Returns:
+    --------
+    array
+        Filtered signal
     """
 
     nyquist = fs / 2
