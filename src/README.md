@@ -25,7 +25,28 @@ An open-source, platform-agnostic Python library and GUI designed for analyzing 
 
 ##  Installation & Dependencies
 This library requires Python 3.8+. To set up your environment:
+Follow these steps to set up the environment and run the analysis tool.
+
+## 1. Install Anaconda
+If you don't have it yet, download and install **Anaconda** or **Miniconda**:
+* [Download Anaconda](https://anaconda.com)
+
+## 2. Create the Environment
+Open your **Anaconda Prompt** (search for it in the Start Menu) and run these commands one by one to create a dedicated environment and install the necessary libraries:
 
 ```bash
-pip install numpy matplotlib scipy tdt
+# Create a new environment named 'neuro'
+conda create -n neuro python=3.11 -y
+
+# Activate the environment
+conda activate neuro
+
+# Install core scientific packages via Conda
+conda install scipy numpy matplotlib pandas -y
+
+# Install Spyder (the IDE)
+conda install spyder -y
+
+# Install TDT-specific libraries (not included in Anaconda by default)
+pip install tdt
 ```
